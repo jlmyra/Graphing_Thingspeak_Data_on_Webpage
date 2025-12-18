@@ -1,0 +1,383 @@
+TRH-2
+<div id="controls-panel" style="margin-bottom: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9;">
+    
+    <div class="control-group" style="display: inline-block; margin-right: 30px; vertical-align: top;">
+        <label style="font-weight: bold; display: block; margin-bottom: 5px;">Filter Time Frame (Local Time):</label>
+        <label for="start_date_input">From:</label>
+        <input type="datetime-local" id="start_date_input" style="margin-right: 15px;">
+        <label for="end_date_input">To:</label>
+        <input type="datetime-local" id="end_date_input" style="margin-right: 15px;">
+        <button id="apply_filter_button">Apply Filter</button>
+    </div>
+
+    <div class="control-group" style="display: inline-block; vertical-align: top;">
+        <label style="font-weight: bold; display: block; margin-bottom: 5px;">Select Data Series:</label>
+        <input type="checkbox" id="field3" checked onclick="drawDashboard()"> <label for="field3">Ambient Temperature</label><br>
+        <input type="checkbox" id="field4" checked onclick="drawDashboard()"> <label for="field4">Ambient RH</label><br>
+        <input type="checkbox" id="field5" checked onclick="drawDashboard()"> <label for="field5">Healing Chamber Temperature</label><br>
+        <input type="checkbox" id="field6" checked onclick="drawDashboard()"> <label for="field6">Healing Chamber RH</label><br>
+        <input type="checkbox" id="field7" checked onclick="drawDashboard()"> <label for="field7">Barometric Pressure</label>
+    </div>
+</div>
+    
+<div id="dashboard_div" style="width: 1200px; height: 700px;"> 
+    <div id="chart_div" style="width: 100%; height: 550px;"></div>
+    <div id="filter_div" style="width: 100%; height: 100px;"></div>
+</div>
+<div id="loading_status">Click "Apply Filter" to load data for the selected range.</div>
+
+
+<script type="text/javascript" src="//www.gstatic.com/charts/loader.js"></script>
+<script type="text/javascript">
+
+    // Constants
+    const CHANNEL_ID = 77784; 
+    const BASE_THINGSPEAK_URL = '//api.thingspeak.com/channels/' + CHANNEL_ID + '/feeds.json?average=14400';
+    
+    // Globals
+    let dashboard = null; 
+    let dateFilterWrapper = null; 
+    let lastFilterState = null; 
+    let isFilterApplied = false; 
+    let fullDataFeeds = []; // Stores raw data feeds fetched from ThingSpeak.
+    let requestedEndDate = null; // Stores the user's requested end date (no buffer)
+
+    // Mapping between ThingSpeak field numbers and descriptive labels.
+    const FIELD_MAP = {
+        3: {label: 'Ambient Temperature'}, 
+        4: {label: 'Ambient RH'},           
+        5: {label: 'Healing Chamber Temperature'}, 
+        6: {label: 'Healing Chamber RH'}, 
+        7: {label: 'Barometric Pressure'} 
+    };
+    
+    google.charts.load('current', {'packages': ['corechart', 'controls']});
+    google.charts.setOnLoadCallback(initializeDashboard); 
+
+    // ------------------------------------
+    // INITIALIZATION AND HELPERS
+    // ------------------------------------
+    function initializeDashboard() {
+        // Set default 7-day filter range on load
+        const defaultEnd = new Date();
+        const defaultStart = new Date(defaultEnd.getTime() - (7 * 24 * 60 * 60 * 1000));
+        
+        document.getElementById('start_date_input').value = formatDateToISO(defaultStart);
+        document.getElementById('end_date_input').value = formatDateToISO(defaultEnd);
+
+        attachFilterButtonListener(); 
+        
+        applyDateFilter(true);
+    }
+    
+    // Converts a Date object to the required "YYYY-MM-DDTHH:MM" local time string format for inputs.
+    function formatDateToISO(date) {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        const hour = String(date.getHours()).padStart(2, '0');
+        const minute = String(date.getMinutes()).padStart(2, '0');
+        return `${year}-${month}-${day}T${hour}:${minute}`;
+    }
+
+    // Parses local date/time string and returns a UTC Date object for ThingSpeak API calls.
+    function parseLocalDateTimeString(dtString) {
+        if (!dtString) return null;
+        
+        const parts = dtString.split('T');
+        if (parts.length !== 2) return null;
+
+        const dateParts = parts[0].split('-').map(p => parseInt(p, 10));
+        const timeParts = parts[1].split(':').map(p => parseInt(p, 10));
+
+        if (dateParts.length !== 3 || timeParts.length < 2) return null;
+
+        // Uses Date.UTC() to handle local time input correctly for the API
+        const utcTime = Date.UTC(
+            dateParts[0], dateParts[1] - 1, dateParts[2], 
+            timeParts[0], timeParts[1], 0, 0
+        );
+        
+        const d = new Date(utcTime);
+        return isNaN(d.getTime()) ? null : d;
+    }
+
+
+    // ------------------------------------
+    // DATA FETCHING (Stores raw feeds)
+    // ------------------------------------
+    async function fetchDynamicData(startDate, endDate) {
+        if (!startDate || !endDate) return null;
+
+        // Format the endDate for the API URL
+        const tsEnd = endDate.toISOString().replace('.000Z', '').replace('T', '%20');
+        
+        // Use 'end' and 'results=8000'. This fetches the latest 8000 points up to the specified end date.
+        const dynamicURL = `${BASE_THINGSPEAK_URL}&end=${tsEnd}&results=8000`;
+        
+        document.getElementById('loading_status').textContent = 'Fetching data from ThingSpeak for range...';
+
+        try {
+            const response = await fetch(dynamicURL);
+            const data = await response.json();
+
+            if (!data || !data.feeds) {
+                document.getElementById('loading_status').innerHTML = '<p style="color: red;">Error: Could not load data from ThingSpeak.</p>';
+                return null;
+            }
+            
+            fullDataFeeds = data.feeds; // Store the raw feeds
+            return true; 
+
+        } catch (error) {
+            document.getElementById('loading_status').innerHTML = '<p style="color: red;">Network/Parsing Error: Failed to process ThingSpeak data.</p>';
+            console.error("Fetch/Parsing Error:", error);
+            return null;
+        }
+    }
+
+
+    // ------------------------------------
+    // CREATE DYNAMIC DATA TABLE 
+    // ------------------------------------
+    function createDynamicDataTable() {
+        const dt = new google.visualization.DataTable();
+        
+        // 1. Identify which fields are checked
+        const fieldConfigs = [];
+        
+        for (let fieldNum = 3; fieldNum <= 7; fieldNum++) {
+            const checkbox = document.getElementById('field' + fieldNum);
+            if (checkbox && checkbox.checked) {
+                fieldConfigs.push({
+                    key: 'field' + fieldNum,
+                    label: FIELD_MAP[fieldNum].label
+                });
+            }
+        }
+        
+        if (fieldConfigs.length === 0) {
+            return null; // No data selected
+        }
+
+        // 2. Define Columns: Date (Index 0), followed by selected series (Index 1, 2, 3, ...)
+        dt.addColumn('datetime', 'Date and Time'); // Index 0
+        fieldConfigs.forEach(config => {
+            dt.addColumn('number', config.label); 
+        });
+
+        // 3. Populate Rows
+        if (fullDataFeeds.length === 0) {
+            // Add a dummy row for the correct column structure if no data is present
+            document.getElementById('loading_status').innerHTML = '<p style="color: orange;">No data found for this period. Showing default axes.</p>';
+            const defaultDate = lastFilterState && lastFilterState.range && lastFilterState.range.start ? lastFilterState.range.start : new Date();
+            const dummyRow = [defaultDate];
+            for (let i = 0; i < fieldConfigs.length; i++) {
+                dummyRow.push(null);
+            }
+            dt.addRow(dummyRow);
+        } else {
+            fullDataFeeds.forEach(feed => {
+                const row = [new Date(feed.created_at)]; 
+                fieldConfigs.forEach(config => {
+                    const value = feed[config.key] ? parseFloat(feed[config.key]) : null; 
+                    row.push(value);
+                });
+                dt.addRow(row);
+            });
+            
+            // ⭐ REFINED PADDING LOGIC: Ensure the data table spans the full requested range.
+            if (requestedEndDate && fullDataFeeds.length > 0) {
+                const lastDataPoint = new Date(fullDataFeeds[fullDataFeeds.length - 1].created_at);
+
+                // Check if the requested end date is slightly later than the last received data point (1 minute buffer).
+                if (requestedEndDate.getTime() > lastDataPoint.getTime() + (60 * 1000)) { 
+                    
+                    // Add a final row at the user's requested end date with null data.
+                    const paddingRow = [requestedEndDate]; 
+                    
+                    // Add null for every data column
+                    for (let i = 0; i < fieldConfigs.length; i++) {
+                        paddingRow.push(null);
+                    }
+                    dt.addRow(paddingRow);
+                }
+            }
+        }
+        
+        return dt;
+    }
+
+
+    // ------------------------------------
+    // DASHBOARD RENDERING
+    // ------------------------------------
+    function drawDashboard() {
+        // Generate the new DataTable based on current checkbox selection
+        const newDataTable = createDynamicDataTable(); 
+        
+        if (!newDataTable) {
+            document.getElementById('chart_div').innerHTML = '<p style="color: red;">Please select at least one data series to display.</p>';
+            document.getElementById('filter_div').innerHTML = '';
+            document.getElementById('loading_status').textContent = '';
+            return;
+        }
+        
+        // DESTROY: Destroy existing dashboard and wrappers before rebuilding to prevent conflicts
+        if (dashboard) {
+            dashboard = null;
+            dateFilterWrapper = null;
+            document.getElementById('chart_div').innerHTML = '';
+            document.getElementById('filter_div').innerHTML = '';
+        }
+
+        // 1. Instantiate the Dashboard
+        dashboard = new google.visualization.Dashboard(document.getElementById('dashboard_div'));
+
+        // 2. Calculate initial state (preserves the zoomed filter state after data reload or checkbox change)
+        let initialState = null;
+        if (isFilterApplied) {
+            initialState = lastFilterState; 
+            isFilterApplied = false;
+        } 
+        
+        // 3. Create the ChartRangeFilter (Range Slider Control)
+        dateFilterWrapper = new google.visualization.ControlWrapper({
+            'controlType': 'ChartRangeFilter',
+            'containerId': 'filter_div',
+            'options': {
+                'filterColumnIndex': 0, // Filter operates on the Date column
+                'ui': {
+                    'chartOptions': { 
+                        'height': 50, 
+                        'chartArea': {'width': '90%'},
+                        // Set thumbnail to use the Date column (0) and the first available data column (1) 
+                        'chartView': { 'columns': [0, 1] }, 
+                    }, 
+                    'allowTyping': false 
+                }
+            },
+            'state': initialState
+        });
+
+        // 4. Create the Line Chart
+        const lineChartOptions = {
+            'title': 'ThingSpeak Sensor Data (Filtered View)',
+            'height': 550, // Chart Height
+            'legend': {'position': 'bottom'},
+            'interpolateNulls': true,
+            // Maximize the actual plotting area within the container
+            'chartArea': {
+                'left': 80,      
+                'right': 80,     
+                'top': 30,       
+                'bottom': 80,    
+                'width': 'auto', 
+                'height': 'auto' 
+            },
+            'hAxis': { 
+                'title': 'Date and Time', 
+                'format': 'MMM dd, yyyy',
+                // Removing explicit viewWindow setting to avoid conflicts with ChartRangeFilter.
+            },
+            'vAxis': { 
+                'title': 'Value',
+                'titlePosition': 'in' 
+            }
+        };
+
+        const lineChart = new google.visualization.ChartWrapper({
+            'chartType': 'LineChart',
+            'containerId': 'chart_div',
+            'options': lineChartOptions,
+        });
+
+        // 5. Bind and Draw using the NEW DataTable
+        dashboard.bind(dateFilterWrapper, lineChart);
+        dashboard.draw(newDataTable); 
+        
+        document.getElementById('loading_status').textContent = 'Data loaded and displayed.';
+    }
+
+
+    // ------------------------------------
+    // CUSTOM DATE FILTER LOGIC (Triggers Dynamic Fetch)
+    // ------------------------------------
+    async function applyDateFilter(isInitialLoad = false) {
+        const startInput = document.getElementById('start_date_input').value;
+        const endInput = document.getElementById('end_date_input').value;
+
+        // 1. Parse dates and enforce range
+        let startDate = parseLocalDateTimeString(startInput);
+        let endDate = parseLocalDateTimeString(endInput);
+        
+        if (!startDate || !endDate) {
+            document.getElementById('loading_status').innerHTML = '<p style="color: red;">Please select both a valid start and end date/time.</p>';
+            return;
+        }
+
+        if (startDate.getTime() >= endDate.getTime()) {
+            document.getElementById('loading_status').innerHTML = '<p style="color: red;">Start date must be before end date.</p>';
+            return;
+        }
+
+        // Set the global requestedEndDate (used for data table padding)
+        requestedEndDate = endDate; 
+
+        // 2. Prepare the filter state 
+        // Note: Adding 1 second buffer to the end date for the ChartRangeFilter's exclusive end point.
+        const state = { 
+            range: { 
+                start: startDate, 
+                end: new Date(endDate.getTime() + 1000) 
+            } 
+        };
+        
+        // 3. Set flags before the fetch/draw process begins
+        isFilterApplied = true; 
+        
+        document.getElementById('loading_status').textContent = `Fetching data for range ${startDate.toLocaleDateString()} to ${endDate.toLocaleDateString()}...`;
+
+        // 4. Fetch the raw feeds from ThingSpeak
+        const success = await fetchDynamicData(startDate, endDate);
+
+        if (success) {
+            
+            // SYNCHRONIZE ONLY THE START DATE (the 'From' box)
+            if (fullDataFeeds.length > 0) {
+                
+                // Get the actual start time of the 8000 points returned by ThingSpeak
+                const trueStartDate = new Date(fullDataFeeds[0].created_at);
+                
+                // Update the UI input field (formatted back to local ISO string)
+                document.getElementById('start_date_input').value = formatDateToISO(trueStartDate);
+
+                // Update the state object's start time to match the true data start
+                state.range.start = trueStartDate;
+                
+                // The 'end date' UI input is NOT updated, preserving the user's manual entry (12/06).
+            }
+            
+            // 5. Update the global state variable
+            lastFilterState = state;
+
+            // 6. Force the complete rebuild of the chart
+            setTimeout(() => {
+                drawDashboard(); 
+                document.getElementById('loading_status').textContent = "Filter applied. Chart rebuilt with new data.";
+            }, 500);
+
+        }
+    }
+
+    // ------------------------------------
+    // ATTACH EVENT LISTENER
+    // ------------------------------------
+    function attachFilterButtonListener() {
+        const button = document.getElementById('apply_filter_button');
+        if (button) {
+            button.removeEventListener('click', applyDateFilter);
+            button.addEventListener('click', applyDateFilter);
+        }
+    }
+</script>
