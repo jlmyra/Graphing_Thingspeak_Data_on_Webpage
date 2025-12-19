@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>ThingSpeak Local Dashboard</title>
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+</head>
+<body>
+
+<div id="controls-panel" style="margin-bottom: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; background-color: #f9f9f9; font-family: Arial, sans-serif;">
+    <div class="control-group" style="display: inline-block; margin-right: 30px; vertical-align: top;">
+        <label style="font-weight: bold; display: block; margin-bottom: 5px;">Filter Time Frame (Local Time):</label>
+        <label for="start_date_input">From:</label>
+        <input type="datetime-local" id="start_date_input" style="margin-right: 15px;">
+        <label for="end_date_input">To:</label>
+        <input type="datetime-local" id="end_date_input" style="margin-right: 15px;">
+        <button id="apply_filter_button">Apply Filter</button>
+    </div>
+
+    <div class="control-group" style="display: inline-block; vertical-align: top;">
+        <label style="font-weight: bold; display: block; margin-bottom: 5px;">Select Data Series:</label>
+        <input type="checkbox" id="field3" checked onclick="drawDashboard()"> <label for="field3">Ambient Temp</label><br>
+        <input type="checkbox" id="field4" checked onclick="drawDashboard()"> <label for="field4">Ambient RH</label><br>
+        <input type="checkbox" id="field5" checked onclick="drawDashboard()"> <label for="field5">Healing Temp</label><br>
+        <input type="checkbox" id="field6" checked onclick="drawDashboard()"> <label for="field6">Healing RH</label><br>
+        <input type="checkbox" id="field7" checked onclick="drawDashboard()"> <label for="field7">Pressure</label>
+    </div>
+</div>
+    
+<div id="dashboard_div" style="width: 100%; max-width: 1200px;"> 
+    <div id="chart_div" style="width: 100%; height: 550px;"></div>
+    <div id="filter_div" style="width: 100%; height: 100px;"></div>
+</div>
+<div id="loading_status" style="font-family: Arial; margin-top: 10px;">Initial load...</div>
+
+<script type="text/javascript">
+    const CHANNEL_ID = 77784; 
+    // Explicitly using https:// for local file execution
+    const BASE_THINGSPEAK_URL = 'https://api.thingspeak.com/channels/' + CHANNEL_ID + '/feeds.json?average=14400';
+    
+    let dashboard = null; 
+    let dateFilterWrapper = null; 
+    let lastFilterState = null; 
+    let isFilterApplied = false; 
+    let fullDataFeeds = []; 
+    let requestedEndDate = null;
+
+    const FIELD_MAP = {
+        3: {label: 'Ambient Temperature'}, 4: {label: 'Ambient RH'},           
+        5: {label: 'Healing Chamber Temperature'}, 6: {label: 'Healing Chamber RH'}, 
+        7: {label: 'Barometric Pressure'} 
+    };
+    
+    google.charts.load('current', {'packages': ['corechart', 'controls']});
+    google.charts.setOnLoadCallback(initializeDashboard); 
+
+    function initializeDashboard() {
+        const defaultEnd = new Date();
+        const defaultStart = new Date(defaultEnd.getTime() - (7 * 24 * 60 * 60 * 1000));
+        document.getElementById('start_date_input').value = formatDateToISO(defaultStart);
+        document.getElementById('end_date_input').value = formatDateToISO(defaultEnd);
+        attachFilterButtonListener(); 
+        applyDateFilter(true);
+    }
+    
+    function formatDateToISO(date) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function parseLocalDateTimeString(dtString) {
+        if (!dtString) return null;
+        const [d, t] = dtString.split('T');
+        const [Y, M, D] = d.split('-').map(Number);
+        const [h, m] = t.split(':').map(Number);
+        return new Date(Date.UTC(Y, M - 1, D, h, m));
+    }
+
+    async function fetchDynamicData(startDate, endDate) {
+        const tsEnd = endDate.toISOString().replace('.000Z', '').replace('T', '%20');
+        const dynamicURL = `${BASE_THINGSPEAK_URL}&end=${tsEnd}&results=8000`;
+        try {
+            const response = await fetch(dynamicURL);
+            const data = await response.json();
+            fullDataFeeds = data.feeds || [];
+            return true;
+        } catch (e) {
+            console.error(e);
+            return false;
+        }
+    }
+
+    function createDynamicDataTable() {
+        const dt = new google.visualization.DataTable();
+        const activeFields = [];
+        for (let i = 3; i <= 7; i++) {
+            if (document.getElementById('field' + i).checked) activeFields.push({key: 'field' + i, label: FIELD_MAP[i].label});
+        }
+        if (activeFields.length === 0) return null;
+
+        dt.addColumn('datetime', 'Time');
+        activeFields.forEach(f => dt.addColumn('number', f.label));
+
+        if (fullDataFeeds.length > 0) {
+            fullDataFeeds.forEach(f => {
+                const row = [new Date(f.created_at)];
+                activeFields.forEach(af => row.push(f[af.key] ? parseFloat(f[af.key]) : null));
+                dt.addRow(row);
+            });
+            
+            // Padding Logic
+            if (requestedEndDate) {
+                const last = new Date(fullDataFeeds[fullDataFeeds.length - 1].created_at);
+                if (requestedEndDate.getTime() > last.getTime() + 60000) {
+                    const padRow = [requestedEndDate];
+                    activeFields.forEach(() => padRow.push(null));
+                    dt.addRow(padRow);
+                }
+            }
+        }
+        return dt;
+    }
+
+    function drawDashboard() {
+        const dt = createDynamicDataTable();
+        if (!dt) return;
+        if (dashboard) {
+            document.getElementById('chart_div').innerHTML = '';
+            document.getElementById('filter_div').innerHTML = '';
+        }
+
+        dashboard = new google.visualization.Dashboard(document.getElementById('dashboard_div'));
+        const initialState = isFilterApplied ? lastFilterState : null;
+        isFilterApplied = false;
+
+        dateFilterWrapper = new google.visualization.ControlWrapper({
+            'controlType': 'ChartRangeFilter',
+            'containerId': 'filter_div',
+            'options': { 'filterColumnIndex': 0, 'ui': { 'chartOptions': { 'height': 50, 'chartArea': {'width': '90%'} } } },
+            'state': initialState
+        });
+
+        const lineChart = new google.visualization.ChartWrapper({
+            'chartType': 'LineChart',
+            'containerId': 'chart_div',
+            'options': {
+                'height': 550, 'interpolateNulls': true, 'legend': 'bottom',
+                'chartArea': {'left': 50, 'right': 50, 'top': 30, 'bottom': 80}
+            }
+        });
+
+        dashboard.bind(dateFilterWrapper, lineChart);
+        dashboard.draw(dt);
+    }
+
+    async function applyDateFilter() {
+        const start = parseLocalDateTimeString(document.getElementById('start_date_input').value);
+        const end = parseLocalDateTimeString(document.getElementById('end_date_input').value);
+        if (!start || !end) return;
+
+        requestedEndDate = end;
+        lastFilterState = { range: { start: start, end: new Date(end.getTime() + 1000) } };
+        isFilterApplied = true;
+
+        document.getElementById('loading_status').textContent = 'Fetching...';
+        const success = await fetchDynamicData(start, end);
+        if (success) {
+            if (fullDataFeeds.length > 0) {
+                const trueStart = new Date(fullDataFeeds[0].created_at);
+                document.getElementById('start_date_input').value = formatDateToISO(trueStart);
+                lastFilterState.range.start = trueStart;
+            }
+            drawDashboard();
+            document.getElementById('loading_status').textContent = 'Loaded.';
+        }
+    }
+
+    function attachFilterButtonListener() {
+        document.getElementById('apply_filter_button').onclick = applyDateFilter;
+    }
+</script>
+</body>
+</html>
