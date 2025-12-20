@@ -1,12 +1,227 @@
 <!DOCTYPE html>
-<html lang="en">
+<html>
 <head>
-    <meta charset="UTF-8">
-    <title>Run JS File</title>
+    <title>ThingSpeak Environmental Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black">
+    <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; padding: 20px; color: #333; background-color: #f4f7f6; }
+        #controls-panel { 
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 20px; padding: 20px; border: 1px solid #ddd; 
+            border-radius: 12px; background-color: #ffffff; box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+        }
+        .control-section { display: flex; flex-direction: column; gap: 10px; }
+        .input-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+        label { font-size: 14px; font-weight: bold; }
+        input[type="datetime-local"] { padding: 6px 10px; border: 1px solid #ccc; border-radius: 4px; }
+        button { padding: 8px 16px; border-radius: 4px; cursor: pointer; font-weight: 600; border: 1px solid #ccc; }
+        #apply_filter_button { background-color: #007bff; color: white; border: none; }
+        .btn-pdf { background-color: #d9534f; color: white; border: none; }
+        .refresh-group { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; color: #666; padding-left: 15px; border-left: 2px solid #eee; }
+        #timer_display { color: #d9534f; font-family: monospace; }
+        .checkbox-group { display: flex; flex-wrap: wrap; gap: 15px; align-items: center; font-size: 13px; }
+        #dashboard_div { background: white; padding: 25px; border-radius: 12px; border: 1px solid #ddd; }
+        #chart_div { width: 100%; height: 600px; }
+        #filter_div { width: 100%; height: 70px; margin-top: 10px; }
+        #loading_status { margin-top: 10px; font-size: 13px; font-weight: 600; color: #666; }
+        @media print {
+            #controls-panel, #loading_status, #filter_div { display: none !important; }
+            #dashboard_div { border: none; padding: 0; }
+        }
+    </style>
 </head>
 <body>
-    <h1>My JavaScript Demo</h1>
-    <!-- Link to your JavaScript file -->
-    <script src="Thingspeak_Grapher.js"></script>
+
+<div id="controls-panel">
+    <div class="control-section">
+        <label>Time Frame & Refresh:</label>
+        <div class="input-row">
+            <span>From:</span> <input type="datetime-local" id="start_date_input">
+            <span>To:</span> <input type="datetime-local" id="end_date_input">
+            <button id="apply_filter_button">Update Graph</button>
+            <button class="btn-pdf" onclick="window.print()">Save PDF</button>
+            <div class="refresh-group">
+                <input type="checkbox" id="auto_refresh_chkbx" onchange="toggleAutoRefresh()"> <span>Live</span> <span id="timer_display"></span>
+            </div>
+        </div>
+    </div>
+    <div class="control-section">
+        <label>Select Series:</label>
+        <div class="checkbox-group">
+            <span><input type="checkbox" id="field3" checked onclick="drawDashboard()"> Ambient Temp</span>
+            <span><input type="checkbox" id="field4" checked onclick="drawDashboard()"> Ambient RH</span>
+            <span><input type="checkbox" id="field5" checked onclick="drawDashboard()"> Healing Temp</span>
+            <span><input type="checkbox" id="field6" checked onclick="drawDashboard()"> Healing RH</span>
+            <span><input type="checkbox" id="field7" checked onclick="drawDashboard()"> Pressure</span>
+        </div>
+        <div class="checkbox-group" id="series_checkboxes"></div>
+    </div>
+</div>
+    
+<div id="dashboard_div"> 
+    <div id="chart_div"></div>
+    <div id="filter_div"></div>
+</div>
+<div id="loading_status">Initializing...</div>
+
+<script type="text/javascript">
+    const CHANNEL_ID = 77784; 
+    // CONFIGURATION: Define your channels here
+    const CHANNELS = [
+        {
+            id: 79378,
+            name: 'TRH-1',
+            fields: {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'}
+        },
+        {
+            id: 77784,
+            name: 'TRH-2',
+            fields: {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'}
+        }
+    ];
+
+    let dashboard, allChannelData = [], countdownInterval = null, secondsRemaining = 900;
+
+    google.charts.load('current', {'packages': ['corechart', 'controls']});
+    google.charts.setOnLoadCallback(() => {
+        initCheckboxes();
+        const end = new Date();
+        const start = new Date(end.getTime() - (7 * 24 * 60 * 60 * 1000));
+        document.getElementById('start_date_input').value = formatDateToInput(start);
+        document.getElementById('end_date_input').value = formatDateToInput(end);
+        document.getElementById('apply_filter_button').onclick = applyDateFilter;
+        applyDateFilter();
+    });
+
+    function formatDateToInput(date) {
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function initCheckboxes() {
+        const container = document.getElementById('series_checkboxes');
+        container.innerHTML = '<span><b>Channels:</b></span>';
+        CHANNELS.forEach(ch => {
+            const span = document.createElement('span');
+            const input = document.createElement('input');
+            input.type = 'checkbox';
+            input.id = `ch_${ch.id}`;
+            input.checked = true;
+            input.onclick = drawDashboard;
+            span.appendChild(input);
+            span.appendChild(document.createTextNode(` ${ch.name} (${ch.id})`));
+            container.appendChild(span);
+        });
+    }
+
+    async function applyDateFilter() {
+        const start = new Date(document.getElementById('start_date_input').value);
+        const end = new Date(document.getElementById('end_date_input').value);
+        if (isNaN(start) || isNaN(end) || start >= end) return;
+
+        document.getElementById('loading_status').textContent = 'Fetching 8000 points...';
+        const tsEnd = end.toISOString().split('.')[0].replace('T', '%20');
+        const rangeHours = (end - start) / 3600000;
+        const avg = rangeHours > 48 ? '&average=14400' : '';
+
+        try {
+            const promises = CHANNELS.map(async (ch) => {
+                const url = `https://api.thingspeak.com/channels/${ch.id}/feeds.json?results=8000&end=${tsEnd}${avg}`;
+                const res = await fetch(url);
+                const json = await res.json();
+                return { config: ch, feeds: json.feeds || [] };
+            });
+
+            allChannelData = await Promise.all(promises);
+            drawDashboard();
+            
+            const totalPoints = allChannelData.reduce((acc, item) => acc + item.feeds.length, 0);
+            document.getElementById('loading_status').textContent = `Loaded ${totalPoints} points from ${CHANNELS.length} channel(s).`;
+        } catch (e) {
+            console.error(e);
+            document.getElementById('loading_status').textContent = 'Error fetching data.';
+        }
+    }
+
+    function drawDashboard() {
+        if (allChannelData.length === 0) return;
+
+        const dt = new google.visualization.DataTable();
+        dt.addColumn('datetime', 'Time');
+        
+        const fieldMap = {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'};
+        const activeFields = [3,4,5,6,7].filter(f => {
+            const cb = document.getElementById('field'+f);
+            return cb && cb.checked;
+        });
+        
+        const activeSeries = [];
+        
+        // Setup Columns based on Active Channels AND Active Fields
+        allChannelData.forEach(chData => {
+            const chCb = document.getElementById(`ch_${chData.config.id}`);
+            if (chCb && chCb.checked) {
+                activeFields.forEach(fieldKey => {
+                    const label = `${chData.config.name}: ${fieldMap[fieldKey]}`;
+                    dt.addColumn('number', label);
+                    activeSeries.push({ channelId: chData.config.id, fieldKey: 'field' + fieldKey });
+                });
+            }
+        });
+
+        // Flatten and Sort Data
+        let rows = [];
+        allChannelData.forEach(chData => {
+            chData.feeds.forEach(feed => {
+                const row = [new Date(feed.created_at)];
+                let hasData = false;
+                activeSeries.forEach(series => {
+                    if (series.channelId === chData.config.id && feed[series.fieldKey] !== undefined) {
+                        const val = parseFloat(feed[series.fieldKey]);
+                        row.push(isNaN(val) ? null : val);
+                        if (!isNaN(val)) hasData = true;
+                    } else {
+                        row.push(null);
+                    }
+                });
+                if (hasData) rows.push(row);
+            });
+        });
+        
+        rows.sort((a, b) => a[0] - b[0]);
+        dt.addRows(rows);
+
+        dashboard = new google.visualization.Dashboard(document.getElementById('dashboard_div'));
+        const filter = new google.visualization.ControlWrapper({
+            'controlType': 'ChartRangeFilter', 'containerId': 'filter_div',
+            'options': { 'filterColumnIndex': 0, 'ui': { 'chartOptions': { 'height': 50, 'chartArea': {'width': '90%'} } } }
+        });
+        const chart = new google.visualization.ChartWrapper({
+            'chartType': 'LineChart', 'containerId': 'chart_div',
+            'options': { 'height': 600, 'interpolateNulls': true, 'legend': 'bottom', 'chartArea': {'left': 60, 'right': 40, 'top': 40, 'bottom': 60} }
+        });
+        dashboard.bind(filter, chart);
+        dashboard.draw(dt);
+    }
+
+    function toggleAutoRefresh() {
+        clearInterval(countdownInterval);
+        if (document.getElementById('auto_refresh_chkbx').checked) {
+            secondsRemaining = 900;
+            countdownInterval = setInterval(() => {
+                secondsRemaining--;
+                document.getElementById('timer_display').textContent = `(${Math.floor(secondsRemaining/60)}:${(secondsRemaining%60).toString().padStart(2,'0')})`;
+                if (secondsRemaining <= 0) {
+                    document.getElementById('end_date_input').value = formatDateToInput(new Date());
+                    applyDateFilter();
+                    secondsRemaining = 900;
+                }
+            }, 1000);
+        } else { document.getElementById('timer_display').textContent = ''; }
+    }
+</script>
 </body>
 </html>
