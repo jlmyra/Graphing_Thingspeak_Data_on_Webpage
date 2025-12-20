@@ -48,13 +48,12 @@
     <div class="control-section">
         <label>Select Series:</label>
         <div class="checkbox-group">
-            <span><input type="checkbox" id="field3" checked onclick="drawDashboard()"> Ambient Temp</span>
-            <span><input type="checkbox" id="field4" checked onclick="drawDashboard()"> Ambient RH</span>
-            <span><input type="checkbox" id="field5" checked onclick="drawDashboard()"> Healing Temp</span>
-            <span><input type="checkbox" id="field6" checked onclick="drawDashboard()"> Healing RH</span>
-            <span><input type="checkbox" id="field7" checked onclick="drawDashboard()"> Pressure</span>
+            <span><input type="checkbox" id="field3" checked onclick="applyDateFilter()"> Ambient Temp</span>
+            <span><input type="checkbox" id="field4" checked onclick="applyDateFilter()"> Ambient RH</span>
+            <span><input type="checkbox" id="field5" checked onclick="applyDateFilter()"> Healing Temp</span>
+            <span><input type="checkbox" id="field6" checked onclick="applyDateFilter()"> Healing RH</span>
+            <span><input type="checkbox" id="field7" checked onclick="applyDateFilter()"> Pressure</span>
         </div>
-        <div class="checkbox-group" id="series_checkboxes"></div>
     </div>
 </div>
     
@@ -66,25 +65,10 @@
 
 <script type="text/javascript">
     const CHANNEL_ID = 77784; 
-    // CONFIGURATION: Define your channels here
-    const CHANNELS = [
-        {
-            id: 79378,
-            name: 'TRH-1',
-            fields: {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'}
-        },
-        {
-            id: 77784,
-            name: 'TRH-2',
-            fields: {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'}
-        }
-    ];
-
-    let dashboard, allChannelData = [], countdownInterval = null, secondsRemaining = 900;
+    let dashboard, fullDataFeeds = [], countdownInterval = null, secondsRemaining = 900;
 
     google.charts.load('current', {'packages': ['corechart', 'controls']});
     google.charts.setOnLoadCallback(() => {
-        initCheckboxes();
         const end = new Date();
         const start = new Date(end.getTime() - (7 * 24 * 60 * 60 * 1000));
         document.getElementById('start_date_input').value = formatDateToInput(start);
@@ -98,22 +82,6 @@
         return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
     }
 
-    function initCheckboxes() {
-        const container = document.getElementById('series_checkboxes');
-        container.innerHTML = '<span><b>Channels:</b></span>';
-        CHANNELS.forEach(ch => {
-            const span = document.createElement('span');
-            const input = document.createElement('input');
-            input.type = 'checkbox';
-            input.id = `ch_${ch.id}`;
-            input.checked = true;
-            input.onclick = drawDashboard;
-            span.appendChild(input);
-            span.appendChild(document.createTextNode(` ${ch.name} (${ch.id})`));
-            container.appendChild(span);
-        });
-    }
-
     async function applyDateFilter() {
         const start = new Date(document.getElementById('start_date_input').value);
         const end = new Date(document.getElementById('end_date_input').value);
@@ -123,73 +91,32 @@
         const tsEnd = end.toISOString().split('.')[0].replace('T', '%20');
         const rangeHours = (end - start) / 3600000;
         const avg = rangeHours > 48 ? '&average=14400' : '';
+        const url = `https://api.thingspeak.com/channels/${CHANNEL_ID}/feeds.json?results=8000&end=${tsEnd}${avg}`;
 
         try {
-            const promises = CHANNELS.map(async (ch) => {
-                const url = `https://api.thingspeak.com/channels/${ch.id}/feeds.json?results=8000&end=${tsEnd}${avg}`;
-                const res = await fetch(url);
-                const json = await res.json();
-                return { config: ch, feeds: json.feeds || [] };
-            });
-
-            allChannelData = await Promise.all(promises);
+            const response = await fetch(url);
+            const data = await response.json();
+            fullDataFeeds = data.feeds || [];
             drawDashboard();
-            
-            const totalPoints = allChannelData.reduce((acc, item) => acc + item.feeds.length, 0);
-            document.getElementById('loading_status').textContent = `Loaded ${totalPoints} points from ${CHANNELS.length} channel(s).`;
+            document.getElementById('loading_status').textContent = `Loaded ${fullDataFeeds.length} points.`;
         } catch (e) {
-            console.error(e);
             document.getElementById('loading_status').textContent = 'Error fetching data.';
         }
     }
 
     function drawDashboard() {
-        if (allChannelData.length === 0) return;
-
+        if (fullDataFeeds.length === 0) return;
         const dt = new google.visualization.DataTable();
         dt.addColumn('datetime', 'Time');
-        
         const fieldMap = {3:'Ambient Temp', 4:'Ambient RH', 5:'Healing Temp', 6:'Healing RH', 7:'Pressure'};
-        const activeFields = [3,4,5,6,7].filter(f => {
-            const cb = document.getElementById('field'+f);
-            return cb && cb.checked;
-        });
-        
-        const activeSeries = [];
-        
-        // Setup Columns based on Active Channels AND Active Fields
-        allChannelData.forEach(chData => {
-            const chCb = document.getElementById(`ch_${chData.config.id}`);
-            if (chCb && chCb.checked) {
-                activeFields.forEach(fieldKey => {
-                    const label = `${chData.config.name}: ${fieldMap[fieldKey]}`;
-                    dt.addColumn('number', label);
-                    activeSeries.push({ channelId: chData.config.id, fieldKey: 'field' + fieldKey });
-                });
-            }
-        });
+        const active = [3,4,5,6,7].filter(f => document.getElementById('field'+f).checked);
+        active.forEach(f => dt.addColumn('number', fieldMap[f]));
 
-        // Flatten and Sort Data
-        let rows = [];
-        allChannelData.forEach(chData => {
-            chData.feeds.forEach(feed => {
-                const row = [new Date(feed.created_at)];
-                let hasData = false;
-                activeSeries.forEach(series => {
-                    if (series.channelId === chData.config.id && feed[series.fieldKey] !== undefined) {
-                        const val = parseFloat(feed[series.fieldKey]);
-                        row.push(isNaN(val) ? null : val);
-                        if (!isNaN(val)) hasData = true;
-                    } else {
-                        row.push(null);
-                    }
-                });
-                if (hasData) rows.push(row);
-            });
+        fullDataFeeds.forEach(f => {
+            const row = [new Date(f.created_at)];
+            active.forEach(af => row.push(f['field'+af] ? parseFloat(f['field'+af]) : null));
+            dt.addRow(row);
         });
-        
-        rows.sort((a, b) => a[0] - b[0]);
-        dt.addRows(rows);
 
         dashboard = new google.visualization.Dashboard(document.getElementById('dashboard_div'));
         const filter = new google.visualization.ControlWrapper({
